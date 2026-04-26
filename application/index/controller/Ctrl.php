@@ -1358,7 +1358,7 @@ class Ctrl extends Base
                 }
             } catch (\Exception $e){
                 Db::rollback();
-                return json(['code'=>1,'info'=>$e]);
+                return json(['code'=>1,'info'=>$e->getMessage()]);
             }
         }
         return json(['code'=>0,'info'=>lang('请求成功'),'data'=>$bankinfo]);

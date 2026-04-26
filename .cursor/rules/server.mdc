@@ -1,0 +1,16 @@
+---
+alwaysApply: true
+---
+应用服务器
+38.180.189.204
+root
+9922
+951753@sgcpj
+所有服务都运行在docker中，源代码地址在/var/www/9color
+
+数据库服务器
+38.180.150.127
+root
+9922
+HVN8jqpfPB
+所有服务都在docker中运行

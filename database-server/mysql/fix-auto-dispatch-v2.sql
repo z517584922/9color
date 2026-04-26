@@ -34,11 +34,14 @@ BEGIN
     
     DECLARE EXIT HANDLER FOR SQLEXCEPTION
     BEGIN
+        GET DIAGNOSTICS CONDITION 1
+            @error_code = MYSQL_ERRNO,
+            @error_msg = MESSAGE_TEXT;
         ROLLBACK;
         INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
         VALUES (order_id, IFNULL(v_user_id, 0), 'error', 
-                'SQL异常', 
-                ROUND((UNIX_TIMESTAMP() * 1000) - v_start_time), UNIX_TIMESTAMP());
+                CONCAT('SQL异常[', @error_code, ']: ', @error_msg), 
+                ROUND((UNIX_TIMESTAMP() * 1000) - v_start_time), NOW());
     END;
     
     SET v_start_time = UNIX_TIMESTAMP() * 1000;
@@ -56,20 +59,40 @@ BEGIN
     FOR UPDATE;
     
     IF v_user_id IS NOT NULL THEN
+        -- 调试日志：找到订单
+        INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
+        VALUES (order_id, v_user_id, 'debug_found', 
+                CONCAT('找到订单: user_id=', v_user_id, ', goods_id=', IFNULL(v_goods_id, 0), ', amount=', v_order_amount), 
+                0, NOW());
+        
         -- 锁定订单防止重复处理
         UPDATE xy_convey 
-        SET dispatch_status = 999, version = version + 1 
+        SET dispatch_status = 2, version = version + 1 
         WHERE id = order_id AND version = v_version;
         
         SET v_affected_rows = ROW_COUNT();
         
         IF v_affected_rows > 0 THEN
+            -- 调试日志：订单锁定成功
+            INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
+            VALUES (order_id, v_user_id, 'debug_locked', '订单锁定成功', 0, NOW());
+            
             -- 获取用户当前信息
             SELECT balance, level INTO v_balance, v_user_level 
             FROM xy_users WHERE id = v_user_id FOR UPDATE;
             
+            -- 调试日志：用户信息
+            INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
+            VALUES (order_id, v_user_id, 'debug_user', 
+                    CONCAT('用户信息: balance=', v_balance, ', level=', v_user_level), 
+                    0, NOW());
+            
             -- 【核心逻辑】根据订单类型分别处理
-            IF v_goods_id = 0 THEN
+            IF v_goods_id IS NULL OR v_goods_id = 0 THEN
+                -- 调试日志：开始匹配商品
+                INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
+                VALUES (order_id, v_user_id, 'debug_match', '开始智能匹配商品', 0, NOW());
+                
                 -- ========== 情况1：空订单，需要智能匹配商品 ==========
                 SELECT id, goods_price 
                 INTO v_goods_id, v_goods_price
@@ -79,6 +102,12 @@ BEGIN
                   AND goods_price >= (v_balance * 0.1)
                 ORDER BY RAND() 
                 LIMIT 1;
+                
+                -- 调试日志：匹配结果
+                INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
+                VALUES (order_id, v_user_id, 'debug_result', 
+                        CONCAT('匹配结果: goods_id=', IFNULL(v_goods_id, 0), ', price=', IFNULL(v_goods_price, 0)), 
+                        0, NOW());
                 
                 IF v_goods_id > 0 AND v_balance >= v_goods_price THEN
                     -- 计算佣金
@@ -130,7 +159,7 @@ BEGIN
                     
                     SET v_execution_time = ROUND((UNIX_TIMESTAMP() * 1000) - v_start_time);
                     INSERT INTO xy_auto_dispatch_log (order_id, user_id, amount, commission, status, execution_time, create_time)
-                    VALUES (order_id, v_user_id, v_order_amount, v_commission, 'completed_empty', v_execution_time, UNIX_TIMESTAMP());
+                    VALUES (order_id, v_user_id, v_order_amount, v_commission, 'completed_empty', v_execution_time, NOW());
                     
                 ELSE
                     -- 余额不足，智能降级
@@ -151,7 +180,7 @@ BEGIN
                         INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
                         VALUES (order_id, v_user_id, 'smart_downgrade', 
                                 CONCAT('余额不足智能降级: 余额 ', v_balance), 
-                                v_execution_time, UNIX_TIMESTAMP());
+                                v_execution_time, NOW());
                     ELSE
                         UPDATE xy_convey SET dispatch_status = 0 WHERE id = order_id;
                         COMMIT;
@@ -160,7 +189,7 @@ BEGIN
                         INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
                         VALUES (order_id, v_user_id, 'insufficient_balance', 
                                 CONCAT('余额不足: 当前 ', v_balance), 
-                                v_execution_time, UNIX_TIMESTAMP());
+                                v_execution_time, NOW());
                     END IF;
                 END IF;
                 
@@ -199,7 +228,7 @@ BEGIN
                     
                     SET v_execution_time = ROUND((UNIX_TIMESTAMP() * 1000) - v_start_time);
                     INSERT INTO xy_auto_dispatch_log (order_id, user_id, amount, commission, status, execution_time, create_time)
-                    VALUES (order_id, v_user_id, v_order_amount, v_commission, 'completed_existing', v_execution_time, UNIX_TIMESTAMP());
+                    VALUES (order_id, v_user_id, v_order_amount, v_commission, 'completed_existing', v_execution_time, NOW());
                     
                 ELSE
                     -- 未扣款的有商品订单，异常情况
@@ -210,7 +239,7 @@ BEGIN
                     INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
                     VALUES (order_id, v_user_id, 'unpaid_existing_order', 
                             '异常：有商品但未扣款的订单', 
-                            v_execution_time, UNIX_TIMESTAMP());
+                            v_execution_time, NOW());
                 END IF;
             END IF;
             
@@ -219,14 +248,14 @@ BEGIN
             SET v_execution_time = ROUND((UNIX_TIMESTAMP() * 1000) - v_start_time);
             INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
             VALUES (order_id, IFNULL(v_user_id, 0), 'version_conflict', 
-                    '订单版本冲突', v_execution_time, UNIX_TIMESTAMP());
+                    '订单版本冲突', v_execution_time, NOW());
         END IF;
     ELSE
         ROLLBACK;
         SET v_execution_time = ROUND((UNIX_TIMESTAMP() * 1000) - v_start_time);
         INSERT INTO xy_auto_dispatch_log (order_id, user_id, status, error_msg, execution_time, create_time)
         VALUES (order_id, 0, 'order_not_found', 
-                '未找到符合条件的自动派单订单', v_execution_time, UNIX_TIMESTAMP());
+                '未找到符合条件的自动派单订单', v_execution_time, NOW());
     END IF;
 END//
 
